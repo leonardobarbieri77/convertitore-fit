@@ -4,16 +4,15 @@ from fitparse import FitFile
 import tempfile
 import os
 import io
-from datetime import datetime
-import sys
 import zipfile
+from datetime import datetime
 
 st.set_page_config(page_title="FIT Converter", layout="wide", initial_sidebar_state="expanded")
-st.title("🚴‍♂️ FIT ➡️ CSV (Mobile Friendly)")
-st.write("Estrai dati da file .fit - Funziona su desktop e mobile (Pixel, iOS)")
+st.title("🚴‍♂️ FIT ➡️ CSV (Mobile Friendly & Zip Support)")
+st.write("Estrai dati da file .fit o .zip - Ottimizzato per PC, Pixel e iOS")
 
 # ═══════════════════════════════════════════════════════════════
-# CONFIGURAZIONE
+# CONFIGURAZIONE SIDEBAR
 # ═══════════════════════════════════════════════════════════════
 st.sidebar.header("⚙️ Opzioni")
 extract_mode = st.sidebar.radio(
@@ -23,14 +22,12 @@ extract_mode = st.sidebar.radio(
 )
 
 # ═══════════════════════════════════════════════════════════════
-# FILE UPLOADER
+# FILE UPLOADER (Senza filtri type per garantire compatibilità Android)
 # ═══════════════════════════════════════════════════════════════
 st.write("### 📥 Carica un file .fit o .zip")
-
 uploaded_file = st.file_uploader(
-    "Trascina o seleziona file .fit/.zip",
-    type=["fit", "zip", "FIT", "ZIP"],
-    help="File da Garmin Connect (supporta sia .fit che .zip)"
+    "Trascina o seleziona un file .fit o un archivio .zip",
+    help="Supporta file singoli .fit o archivi .zip contenenti file FIT"
 )
 
 if uploaded_file is not None:
@@ -39,7 +36,7 @@ if uploaded_file is not None:
     if file_size_mb > 50:
         st.error(f"❌ File troppo grande ({file_size_mb:.1f} MB)")
         st.stop()
-    
+        
     st.info(f"📊 Analisi in corso... ({file_size_mb:.1f} MB)")
     
     tmp_path = None
@@ -47,10 +44,9 @@ if uploaded_file is not None:
     df = pd.DataFrame()
     
     try:
-        # Estrai se è uno zip
+        # Gestione file ZIP
         if uploaded_file.name.lower().endswith('.zip'):
-            st.write("🔍 Estrazione file zip...")
-            
+            st.write("🔍 Estrazione archivio zip...")
             with tempfile.TemporaryDirectory() as extract_dir:
                 with zipfile.ZipFile(io.BytesIO(fit_data)) as zip_ref:
                     zip_ref.extractall(extract_dir)
@@ -62,83 +58,80 @@ if uploaded_file is not None:
                             fit_files.append(os.path.join(root, file))
                 
                 if not fit_files:
-                    st.error("❌ Nessun file .fit trovato nello zip!")
+                    st.error("❌ Nessun file .fit trovato all'interno dello zip!")
                     st.stop()
                 
+                # Prende il primo file FIT trovato
                 with open(fit_files[0], 'rb') as f:
                     fit_data = f.read()
-                
-                st.success(f"✅ Estratto: {os.path.basename(fit_files[0])}")
-        
-        # Crea file temporaneo
+                st.success(f"✅ Estratto con successo: {os.path.basename(fit_files[0])}")
+
+        # Creazione file temporaneo sicuro per fitparse
         with tempfile.NamedTemporaryFile(delete=False, suffix=".fit") as tmp:
             tmp.write(fit_data)
             tmp_path = tmp.name
-        
-        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
-            st.error("❌ Errore file temporaneo")
-            st.stop()
-        
+            
         fitfile = FitFile(tmp_path)
         
         # ═══════════════════════════════════════════════════════════════
-        # MODALITÀ 1: RECORDS
+        # ESTRAZIONE DATI IN BASE ALLA MODALITÀ SÉLEZIONATA
         # ═══════════════════════════════════════════════════════════════
-        if extract_mode == "Records (Dati continui)":
+        
+        if extract_mode in ["Records (Dati continui)", "Records + Statistiche"]:
             records = []
-            
             for record in fitfile.get_messages('record'):
                 record_data = {}
                 for data in record:
-                    try:
-                        value = data.value
-                        if isinstance(value, (list, tuple)):
-                            value = str(value)
-                        elif value is None:
-                            value = ""
-                        record_data[data.name] = value
-                    except:
-                        pass
+                    value = data.value
+                    if isinstance(value, (list, tuple)):
+                        value = str(value)
+                    # I valori mancanti (None) NON vengono convertiti in stringhe vuote
+                    # per permettere a Pandas di riconoscerli come numeri (NaN)
+                    record_data[data.name] = value
                 records.append(record_data)
-            
+                
             if records:
                 df = pd.DataFrame(records)
-                
                 if 'timestamp' in df.columns:
-                    try:
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                    except:
-                        pass
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
                 
-                st.success(f"✅ {len(df)} record estratti")
+                st.success(f"✅ {len(df)} record continui estratti con successo")
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Record", len(df))
-                with col2:
-                    if 'timestamp' in df.columns:
-                        try:
+                # Se la modalità include le statistiche avanzate, mostra i KPI in alto
+                if extract_mode == "Records + Statistiche":
+                    kpi = st.columns(5)
+                    with kpi[0]:
+                        st.metric("Punti Registrati", len(df))
+                    with kpi[1]:
+                        if 'timestamp' in df.columns and not df['timestamp'].isnull().all():
                             duration = df['timestamp'].max() - df['timestamp'].min()
-                            st.metric("Durata", str(duration).split('.')[0])
-                        except:
-                            st.metric("Durata", "N/A")
+                            st.metric("Durata Attività", str(duration).split('.')[0])
+                    with kpi[2]:
+                        if 'distance' in df.columns:
+                            dist = pd.to_numeric(df['distance'], errors='coerce').max() / 1000
+                            st.metric("Distanza", f"{dist:.2f} km" if not pd.isnull(dist) else "N/A")
+                    with kpi[3]:
+                        if 'heart_rate' in df.columns:
+                            avg_hr = pd.to_numeric(df['heart_rate'], errors='coerce').mean()
+                            st.metric("FC Media", f"{avg_hr:.0f} bpm" if not pd.isnull(avg_hr) else "N/A")
+                    with kpi[4]:
+                        if 'power' in df.columns:
+                            avg_pwr = pd.to_numeric(df['power'], errors='coerce').mean()
+                            st.metric("Potenza Media", f"{avg_pwr:.0f} watt" if not pd.isnull(avg_pwr) else "N/A")
                 
-                st.write("### 📋 Anteprima:")
+                st.write("### 📋 Anteprima della tabella dati:")
                 st.dataframe(df.head(10), use_container_width=True)
                 
+                # Statistiche matematiche sui campi numerici puri
                 numeric_cols = df.select_dtypes(include=['number']).columns
-                if len(numeric_cols) > 0:
-                    st.write("### 📊 Statistiche:")
+                if len(numeric_cols) > 0 and extract_mode == "Records (Dati continui)":
+                    st.write("### 📊 Riepilogo statistico dei campi numerici:")
                     st.dataframe(df[numeric_cols].describe(), use_container_width=True)
             else:
-                st.warning("⚠️ Nessun record trovato")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MODALITÀ 2: TUTTI I MESSAGGI
-        # ═══════════════════════════════════════════════════════════════
+                st.warning("⚠️ Nessun record continuo ('record') trovato in questo file.")
+                
         elif extract_mode == "Tutti i messaggi":
             all_messages = {}
-            
             for message in fitfile.get_messages():
                 msg_type = message.name
                 if msg_type not in all_messages:
@@ -146,141 +139,72 @@ if uploaded_file is not None:
                 
                 msg_data = {}
                 for data in message:
-                    try:
-                        value = data.value
-                        if isinstance(value, (list, tuple)):
-                            value = str(value)
-                        elif value is None:
-                            value = ""
-                        msg_data[data.name] = value
-                    except:
-                        pass
-                
+                    value = data.value
+                    if isinstance(value, (list, tuple)):
+                        value = str(value)
+                    msg_data[data.name] = value
                 all_messages[msg_type].append(msg_data)
+                
+            st.success(f"✅ Trovati {len(all_messages)} tipi di messaggi differenti nel file")
             
-            st.success(f"✅ {len(all_messages)} tipi di messaggi")
-            
-            st.write("### 📝 Tipi:")
+            st.write("### 📝 Riepilogo dei messaggi disponibili:")
             for msg, msgs in all_messages.items():
-                st.write(f"  • {msg}: {len(msgs)}")
-            
-            selected_msg = st.selectbox("Seleziona messaggio", list(all_messages.keys()))
+                st.write(f"  • **{msg}**: {len(msgs)} righe presenti")
+                
+            selected_msg = st.selectbox("Seleziona quale tipo di messaggio vuoi ispezionare ed esportare:", list(all_messages.keys()))
             df = pd.DataFrame(all_messages[selected_msg])
             
             if 'timestamp' in df.columns:
-                try:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                except:
-                    pass
-            
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+                
             st.dataframe(df.head(10), use_container_width=True)
-        
+
         # ═══════════════════════════════════════════════════════════════
-        # MODALITÀ 3: RECORDS + STATISTICHE
-        # ═══════════════════════════════════════════════════════════════
-        else:
-            records = []
-            
-            for record in fitfile.get_messages('record'):
-                record_data = {}
-                for data in record:
-                    try:
-                        value = data.value
-                        if isinstance(value, (list, tuple)):
-                            value = str(value)
-                        elif value is None:
-                            value = ""
-                        record_data[data.name] = value
-                    except:
-                        pass
-                records.append(record_data)
-            
-            if records:
-                df = pd.DataFrame(records)
-                
-                if 'timestamp' in df.columns:
-                    try:
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                    except:
-                        pass
-                
-                st.success(f"✅ {len(df)} record")
-                
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Record", len(df))
-                with col2:
-                    if 'timestamp' in df.columns:
-                        try:
-                            duration = df['timestamp'].max() - df['timestamp'].min()
-                            st.metric("Durata", str(duration).split('.')[0])
-                        except:
-                            st.metric("Durata", "N/A")
-                with col3:
-                    if 'distance' in df.columns:
-                        try:
-                            dist = df['distance'].max() / 1000
-                            st.metric("Km", f"{dist:.2f}")
-                        except:
-                            st.metric("Km", "N/A")
-                with col4:
-                    if 'heart_rate' in df.columns:
-                        try:
-                            avg_hr = df['heart_rate'].mean()
-                            st.metric("FC Media", f"{avg_hr:.0f} bpm")
-                        except:
-                            st.metric("FC Media", "N/A")
-                
-                st.write("### 📋 Dati:")
-                st.dataframe(df, use_container_width=True)
-        
-        # ═══════════════════════════════════════════════════════════════
-        # DOWNLOAD
+        # GENERAZIONE EXPORT (CSV / EXCEL)
         # ═══════════════════════════════════════════════════════════════
         if not df.empty:
             st.divider()
-            st.write("### 💾 Scarica:")
+            st.write("### 💾 Scarica i dati convertiti:")
             
-            col1, col2 = st.columns(2)
+            down_col1, down_col2 = st.columns(2)
+            base_filename = uploaded_file.name.split('.')[0]
             
-            with col1:
+            with down_col1:
                 csv_data = df.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="📥 CSV",
+                    label="📥 Scarica in formato CSV",
                     data=csv_data,
-                    file_name=f"{uploaded_file.name.split('.')[0]}.csv",
+                    file_name=f"{base_filename}.csv",
                     mime="text/csv",
                 )
-            
-            with col2:
+                
+            with down_col2:
                 try:
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df.to_excel(writer, sheet_name='Data', index=False)
-                    buffer.seek(0)
+                        df.to_excel(writer, sheet_name='Dati_Attivita', index=False)
                     
                     st.download_button(
-                        label="📊 Excel",
+                        label="📊 Scarica in formato Excel",
                         data=buffer.getvalue(),
-                        file_name=f"{uploaded_file.name.split('.')[0]}.xlsx",
+                        file_name=f"{base_filename}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                except:
-                    st.info("❌ Excel non disponibile")
-            
-            st.write(f"**Campi**: {len(df.columns)} | **Righe**: {len(df)}")
-    
+                except Exception as excel_err:
+                    st.info(f"Esportazione Excel non disponibile temporaneamente ({excel_err})")
+                    
+            st.write(f"ℹ️ **Riepilogo colonne:** {len(df.columns)} elementi tracciati | **Righe totali:** {len(df)}")
+
     except Exception as e:
-        st.error(f"❌ Errore: {e}")
-        with st.expander("🔍 Debug"):
+        st.error(f"❌ Si è verificato un errore durante l'elaborazione del file: {e}")
+        with st.expander("🔍 Dettagli tecnici dell'errore (Debug)"):
             import traceback
             st.code(traceback.format_exc())
-    
+            
     finally:
+        # Pulizia rigorosa del file temporaneo sul server
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except:
                 pass
-        import gc
-        gc.collect()
