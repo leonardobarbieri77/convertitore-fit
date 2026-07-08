@@ -31,94 +31,84 @@ if is_mobile:
 # ═══════════════════════════════════════════════════════════════
 st.write("### 📥 Carica un file .fit")
 
-# BUG FIX #13: File browser integrato
-if 'current_path' not in st.session_state:
-    # Inizializza con Downloads
-    if os.name == 'nt':  # Windows
-        st.session_state.current_path = os.path.expanduser("~/Downloads")
-    else:  # Linux/Mac/Android
-        st.session_state.current_path = os.path.expanduser("~/Downloads")
-        # Se Downloads non esiste, usa home
-        if not os.path.exists(st.session_state.current_path):
-            st.session_state.current_path = os.path.expanduser("~")
+# BUG FIX #9: Supporta sia .fit che .zip
+uploaded_file = st.file_uploader(
+    "Trascina o seleziona un file .fit o .zip (da Garmin)",
+    type=["fit", "zip", "FIT", "ZIP"],
+    help="Supporta file .fit direttamente o .zip scaricato da Garmin Connect"
+)
 
-uploaded_file = None
-fit_data = None
-
-# Mostra il percorso corrente
-st.write(f"📂 **Percorso**: `{st.session_state.current_path}`")
-
-# Bottone per tornare alla home
-col1, col2 = st.columns([1, 1])
-with col1:
-    if st.button("🏠 Home"):
-        st.session_state.current_path = os.path.expanduser("~")
-        st.rerun()
-
-with col2:
-    if st.button("📥 Downloads"):
-        st.session_state.current_path = os.path.expanduser("~/Downloads")
-        st.rerun()
-
-try:
-    # Elenca file e cartelle
-    items = os.listdir(st.session_state.current_path)
-    folders = [item for item in items if os.path.isdir(os.path.join(st.session_state.current_path, item))]
-    files = [item for item in items if os.path.isfile(os.path.join(st.session_state.current_path, item))]
+if uploaded_file is not None:
+    st.info(f"📂 File caricato: **{uploaded_file.name}**")
     
-    # Ordina
-    folders.sort()
-    files.sort()
+    # BUG FIX #10: Estrai il .fit se il file è un .zip
+    if uploaded_file.name.lower().endswith('.zip'):
+        st.write("🔍 Rilevato file compresso .zip - Estrazione in corso...")
+        
+        import zipfile
+        
+        try:
+            with tempfile.TemporaryDirectory() as extract_dir:
+                # Estrai il zip
+                with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue())) as zip_ref:
+                    zip_ref.extractall(extract_dir)
+                
+                # Trova il file .fit
+                fit_files = []
+                for root, dirs, files in os.walk(extract_dir):
+                    for file in files:
+                        if file.lower().endswith('.fit'):
+                            fit_files.append(os.path.join(root, file))
+                
+                if not fit_files:
+                    st.error("❌ Nessun file .fit trovato nello zip!")
+                    st.info("Il file zip potrebbe avere una struttura diversa. Prova a estrarlo manualmente.")
+                    st.stop()
+                
+                if len(fit_files) > 1:
+                    st.warning(f"⚠️ Trovati {len(fit_files)} file .fit nello zip. Uso il primo...")
+                
+                fit_path = fit_files[0]
+                st.success(f"✅ File estratto: {os.path.basename(fit_path)}")
+                
+                # Leggi il file estratto
+                with open(fit_path, 'rb') as f:
+                    fit_data = f.read()
+                
+                # Crea un file temporaneo dal contenuto
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".fit") as tmp:
+                    tmp.write(fit_data)
+                    tmp_path = tmp.name
+        
+        except zipfile.BadZipFile:
+            st.error("❌ File zip corrotto. Prova a scaricarlo di nuovo da Garmin Connect.")
+            st.stop()
+        except Exception as e:
+            st.error(f"❌ Errore estrazione: {e}")
+            st.stop()
     
-    # Mostra cartelle
-    if folders:
-        st.write("**📁 Cartelle:**")
-        cols = st.columns(3)
-        for idx, folder in enumerate(folders):
-            with cols[idx % 3]:
-                if st.button(f"📂 {folder}", key=f"folder_{folder}"):
-                    st.session_state.current_path = os.path.join(st.session_state.current_path, folder)
-                    st.rerun()
+    elif uploaded_file.name.lower().endswith('.fit'):
+        st.success(f"✅ File .fit riconosciuto")
+        
+        # BUG FIX #11: Crea file temporaneo dal contenuto
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".fit") as tmp:
+            tmp.write(uploaded_file.getvalue())
+            tmp_path = tmp.name
     
-    # Filtra file .fit e .zip
-    fit_files = [f for f in files if f.lower().endswith(('.fit', '.zip'))]
-    other_files = [f for f in files if not f.lower().endswith(('.fit', '.zip'))]
+    else:
+        st.error("❌ Formato non supportato. Usa .fit o .zip")
+        st.stop()
     
-    # Mostra file .fit e .zip evidenziati
-    if fit_files:
-        st.write("**✅ File .fit/.zip (Pronti):**")
-        for file in fit_files:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.write(f"🎯 {file}")
-            with col2:
-                if st.button("📥 Carica", key=f"load_{file}"):
-                    file_path = os.path.join(st.session_state.current_path, file)
-                    with open(file_path, 'rb') as f:
-                        fit_data = f.read()
-                    st.session_state.selected_file = file
-                    st.success(f"✅ File caricato: {file}")
-                    st.rerun()
+    # BUG FIX #12: Verifica che il file sia valido
+    file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
     
-    # Mostra altri file (grigi)
-    if other_files:
-        with st.expander(f"📄 Vedi altri file ({len(other_files)})"):
-            for file in other_files[:20]:  # Mostra max 20
-                st.write(f"  └─ {file}")
+    if file_size_mb > 50:
+        st.error(f"❌ File troppo grande ({file_size_mb:.1f} MB). Massimo 50 MB.")
+        st.stop()
     
-    # Bottone per salire di livello
-    if st.session_state.current_path != os.path.expanduser("~"):
-        if st.button("⬆️ Torna indietro"):
-            st.session_state.current_path = os.path.dirname(st.session_state.current_path)
-            st.rerun()
-
-except PermissionError:
-    st.error(f"❌ Permesso negato: {st.session_state.current_path}")
-except Exception as e:
-    st.error(f"❌ Errore nella navigazione: {e}")
-
-# Se file è stato caricato
-if fit_data is not None:
+    st.info(f"📊 Analisi in corso... ({file_size_mb:.1f} MB)")
+    
+    # ... resto del codice rimane uguale da qui in poi
         
         # Leggi il file FIT
         try:
